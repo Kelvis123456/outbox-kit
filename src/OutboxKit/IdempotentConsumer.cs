@@ -11,7 +11,13 @@ public static class IdempotentConsumer
     /// crash cannot record the message as handled without its effect, or apply the effect
     /// without recording it. Returns false when the message was already handled.
     ///
-    /// The context must not already have an open transaction.
+    /// The context must not already have an open transaction, and must have no pending changes:
+    /// the final SaveChanges would otherwise commit them along with the handler's, and a skipped
+    /// duplicate would leave them queued. Both cases throw InvalidOperationException.
+    ///
+    /// If the handler (or the save) throws, the transaction rolls back and every entity the
+    /// handler added, modified or deleted is reverted in the change tracker, so calling this
+    /// again on the same context applies the effect once, not twice.
     /// </summary>
     public static async Task<bool> HandleOnceAsync(
         this DbContext db,
@@ -21,6 +27,9 @@ public static class IdempotentConsumer
         CancellationToken ct = default,
         TimeProvider? clock = null)
     {
+        if (db.ChangeTracker.HasChanges())
+            throw new InvalidOperationException("The context has pending changes. Save or discard them before HandleOnceAsync.");
+
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
         var now = (clock ?? TimeProvider.System).GetUtcNow();
@@ -34,9 +43,36 @@ public static class IdempotentConsumer
             return false;
         }
 
-        await handler(ct);
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+        try
+        {
+            await handler(ct);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            DiscardChanges(db); // the context started clean, so everything pending came from the handler
+            throw;
+        }
+
         return true;
+    }
+
+    private static void DiscardChanges(DbContext db)
+    {
+        foreach (var entry in db.ChangeTracker.Entries().ToList())
+        {
+            switch (entry.State)
+            {
+                case EntityState.Added:
+                    entry.State = EntityState.Detached;
+                    break;
+                case EntityState.Modified:
+                case EntityState.Deleted:
+                    entry.CurrentValues.SetValues(entry.OriginalValues);
+                    entry.State = EntityState.Unchanged;
+                    break;
+            }
+        }
     }
 }

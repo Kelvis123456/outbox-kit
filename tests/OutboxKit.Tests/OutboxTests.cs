@@ -269,6 +269,69 @@ public sealed class OutboxTests(PostgresFixture pg)
     }
 
     [Fact]
+    public async Task A_failed_handler_can_be_retried_on_the_same_context_without_applying_the_effect_twice()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        var id = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            throw new InvalidOperationException("boom");
+        }));
+        Assert.Empty(db.ChangeTracker.Entries()); // the failed attempt left nothing queued
+
+        Assert.True(await db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            return Task.CompletedTask;
+        }));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(1, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
+    public async Task A_failed_handler_also_reverts_modified_entities()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using (var seed = DemoDb.Connect(cs))
+        {
+            seed.Deliveries.Add(new Delivery { MessageId = Guid.Empty });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = DemoDb.Connect(cs);
+        var row = await db.Deliveries.SingleAsync();
+        var id = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", id, _ =>
+        {
+            row.MessageId = id;
+            throw new InvalidOperationException("boom");
+        }));
+
+        Assert.Equal(Guid.Empty, row.MessageId);
+        Assert.False(db.ChangeTracker.HasChanges());
+    }
+
+    [Fact]
+    public async Task HandleOnce_refuses_a_context_that_already_has_pending_changes()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        db.Deliveries.Add(new Delivery { MessageId = Guid.NewGuid() });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            db.HandleOnceAsync("billing", Guid.NewGuid(), _ => Task.CompletedTask));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Set<InboxMessage>().CountAsync());
+        Assert.Equal(0, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
     public async Task Killing_the_process_between_publish_and_commit_loses_nothing_and_applies_each_effect_once()
     {
         var cs = await pg.NewDatabaseAsync();
