@@ -4,5 +4,5 @@ import { SITE_URL } from "@/site";
 export const dynamic = "force-static";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return [{ url: `${SITE_URL}/`, lastModified: new Date("2026-11-05") }];
+  return [{ url: `${SITE_URL}/`, lastModified: new Date("2026-11-04") }];
 }

@@ -132,10 +132,10 @@ export default function Home() {
       <main id="main">
         <section
           id="top"
-          className="wrap grid items-center gap-10 pb-16 pt-10 md:pt-16 lg:grid-cols-[1.05fr_0.95fr] lg:gap-16"
+          className="wrap grid items-center gap-10 grid-cols-[minmax(0,1fr)] pb-16 pt-10 md:pt-16 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] lg:gap-16"
         >
           <div>
-            <h1 className="text-[clamp(2.4rem,6.2vw,4.4rem)] font-extrabold">
+            <h1 className="text-[clamp(2.3rem,5.2vw,3.9rem)] font-extrabold">
               Commit the change and the message together.
             </h1>
             <p className="mt-6 max-w-[34rem] text-xl leading-snug text-muted">
@@ -153,12 +153,12 @@ export default function Home() {
           </div>
 
           <figure className="m-0">
-            <pre className="code m-0" tabIndex={0} aria-label="The problem, two lines of C#">
+            <pre className="code code-lg m-0" tabIndex={0} aria-label="The problem, two lines of C#">
               <code>
-                {"await db.SaveChangesAsync();          "}
+                {"await db.SaveChangesAsync();\n"}
                 <span className="c">{"// committed"}</span>
-                {"\nawait broker.PublishAsync(message);   "}
-                <span className="k">{"// process dies here: the change exists, nobody was told"}</span>
+                {"\nawait broker.PublishAsync(message);\n"}
+                <span className="k">{"// process dies here: the change exists,\n// nobody was told"}</span>
               </code>
             </pre>
             <figcaption className="mt-3 max-w-[34rem] text-[0.95rem] text-muted">
@@ -180,7 +180,7 @@ export default function Home() {
         </section>
 
         <section id="usage" className="section border-t border-rule">
-          <div className="wrap grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+          <div className="wrap grid grid-cols-[minmax(0,1fr)] gap-10 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-16">
             <div>
               <h2 className="text-[clamp(1.9rem,4vw,3rem)] font-extrabold">Three calls.</h2>
               <p className="mt-4 text-muted">
@@ -262,12 +262,17 @@ export default function Home() {
 
             <div className="mt-16 grid gap-12">
               {groups.map((g) => (
-                <div key={g.name} className="grid gap-4 md:grid-cols-[10rem_minmax(0,1fr)] md:gap-10">
+                <div
+                  key={g.name}
+                  className="grid grid-cols-[minmax(0,1fr)] gap-4 md:grid-cols-[10rem_minmax(0,1fr)] md:gap-10"
+                >
                   <h3 className="font-display text-xl font-bold">{g.name}</h3>
-                  <dl className="m-0 grid gap-6">
+                  <dl className="m-0 grid grid-cols-[minmax(0,1fr)] gap-6">
                     {g.tests.map((t) => (
                       <div key={t.name}>
-                        <dt className="mono break-words text-[0.85rem] font-medium leading-snug">{t.name}</dt>
+                        <dt className="mono [overflow-wrap:anywhere] text-[0.85rem] font-medium leading-snug">
+                          {t.name}
+                        </dt>
                         <dd className="m-0 mt-1 max-w-[48rem] text-muted">{t.what}</dd>
                       </div>
                     ))}
@@ -285,7 +290,7 @@ export default function Home() {
               This is a short reference implementation, not a replacement for MassTransit or Wolverine. Read these
               before you copy it.
             </p>
-            <dl className="m-0 mt-12 grid gap-x-16 gap-y-9 md:grid-cols-2">
+            <dl className="m-0 mt-12 grid grid-cols-[minmax(0,1fr)] gap-x-16 gap-y-9 md:grid-cols-2">
               {limits.map((l) => (
                 <div key={l.lead}>
                   <dt className="font-display text-lg font-bold">{l.lead}</dt>

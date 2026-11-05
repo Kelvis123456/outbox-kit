@@ -103,7 +103,7 @@ function SceneA({ at }: { at: number }) {
         [br, "Broker"],
         [co, "Consumer"],
       ].map(([x, l]) => (
-        <Actor key={l} x={x as number} label={l as string} h={380} />
+        <Actor key={l} x={x as number} label={l as string} h={290} />
       ))}
       <Arrow x1={app} x2={pg} y={96} label="commit" at={at} step={1} />
       <Note x={pg} y={108} w={104} text="order saved" at={at} step={1} />
@@ -246,7 +246,7 @@ export function Diagram() {
         const inner = (
           <>
             <strong>{s.title}</strong>
-            <span className="text-[0.95rem] leading-snug">{s.text}</span>
+            <span className="block text-[0.95rem] leading-snug">{s.text}</span>
           </>
         );
         return (
@@ -275,7 +275,7 @@ export function Diagram() {
   if (reduced) {
     // Static version of the same story: both scenes fully drawn, no controls, no motion.
     return (
-      <div className="dg-static grid gap-10 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)] lg:gap-14">
+      <div className="dg-static grid grid-cols-[minmax(0,1fr)] gap-10 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)] lg:gap-14">
         <div className="grid gap-8">
           <figure className="m-0">
             <figcaption className="mb-2 font-display text-lg font-bold">{SCENE_TITLE.a}</figcaption>
@@ -292,7 +292,11 @@ export function Diagram() {
   }
 
   return (
-    <div ref={rootRef} onKeyDown={onKey} className="grid gap-8 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)] lg:gap-14">
+    <div
+      ref={rootRef}
+      onKeyDown={onKey}
+      className="grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)] lg:gap-14"
+    >
       <div>
         <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Diagram controls">
           <button
@@ -320,8 +324,11 @@ export function Diagram() {
         <p className="mb-3 mt-0 font-display text-lg font-bold" aria-hidden="true">
           {SCENE_TITLE[scene]}
         </p>
-        <div className="rounded-md border border-rule bg-surface p-3" style={{ borderRadius: "var(--radius)" }}>
-          <div className="grid min-h-[22rem] place-items-center">
+        <div
+          className="rounded-md border border-rule bg-surface p-1.5 sm:p-3"
+          style={{ borderRadius: "var(--radius)" }}
+        >
+          <div className="grid min-h-[20rem] place-items-center">
             {scene === "a" ? <SceneA at={step} /> : <SceneB at={step} />}
           </div>
         </div>
