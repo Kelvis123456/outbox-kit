@@ -50,13 +50,7 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
         // AsNoTracking plus per-row ExecuteUpdate: the dispatcher never touches the caller's change
         // tracker, so it cannot save their pending changes or trust a stale tracked copy of a row.
         var batch = await db.Set<OutboxMessage>()
-            .FromSqlInterpolated($"""
-                SELECT * FROM outbox_messages
-                WHERE processed_at IS NULL AND failed_at IS NULL
-                ORDER BY created_at, id
-                LIMIT {_options.BatchSize}
-                FOR UPDATE SKIP LOCKED
-                """)
+            .FromSqlRaw(OutboxSql.PendingBatch(db), _options.BatchSize)
             .AsNoTracking()
             .ToListAsync(ct);
 

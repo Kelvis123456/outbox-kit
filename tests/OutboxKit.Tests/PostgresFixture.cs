@@ -15,6 +15,15 @@ public sealed class PostgresFixture : IAsyncLifetime
     /// <summary>A fresh, empty database per test, so tests cannot see each other's rows.</summary>
     public async Task<string> NewDatabaseAsync()
     {
+        var cs = await NewEmptyDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        await db.Database.EnsureCreatedAsync();
+        return cs;
+    }
+
+    /// <summary>A fresh database with no tables, for tests that bring their own model.</summary>
+    public async Task<string> NewEmptyDatabaseAsync()
+    {
         var name = "t_" + Guid.NewGuid().ToString("N");
         await using (var admin = new NpgsqlConnection(_container.GetConnectionString()))
         {
@@ -23,10 +32,7 @@ public sealed class PostgresFixture : IAsyncLifetime
             await cmd.ExecuteNonQueryAsync();
         }
 
-        var cs = new NpgsqlConnectionStringBuilder(_container.GetConnectionString()) { Database = name, Pooling = false }.ConnectionString;
-        await using var db = DemoDb.Connect(cs);
-        await db.Database.EnsureCreatedAsync();
-        return cs;
+        return new NpgsqlConnectionStringBuilder(_container.GetConnectionString()) { Database = name, Pooling = false }.ConnectionString;
     }
 }
 

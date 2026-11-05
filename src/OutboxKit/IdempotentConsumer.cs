@@ -44,9 +44,7 @@ public static class IdempotentConsumer
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
         var now = (clock ?? TimeProvider.System).GetUtcNow();
-        var inserted = await db.Database.ExecuteSqlInterpolatedAsync(
-            $"INSERT INTO inbox_messages (consumer, message_id, processed_at) VALUES ({consumer}, {messageId}, {now}) ON CONFLICT DO NOTHING",
-            ct);
+        var inserted = await db.Database.ExecuteSqlRawAsync(OutboxSql.InboxInsert(db), [consumer, messageId, now], ct);
 
         if (inserted == 0)
         {
