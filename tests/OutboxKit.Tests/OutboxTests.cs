@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ChaosWorker;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -64,27 +65,66 @@ public sealed class OutboxTests(PostgresFixture pg)
         Assert.Equal(25, await check.BrokerLog.CountAsync());
     }
 
+    private sealed class WorkerTaggingPublisher(int worker, ConcurrentDictionary<Guid, int> handledBy, IOutboxPublisher inner) : IOutboxPublisher
+    {
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct)
+        {
+            handledBy[message.Id] = worker;
+            return inner.PublishAsync(message, ct);
+        }
+    }
+
     [Fact]
-    public async Task Two_dispatchers_running_at_once_never_publish_the_same_message()
+    public async Task Three_dispatchers_running_at_once_never_publish_the_same_message()
     {
         var cs = await pg.NewDatabaseAsync();
         await SeedAsync(cs, 40);
+        var handledBy = new ConcurrentDictionary<Guid, int>();
 
-        async Task Worker()
+        async Task Worker(int n)
         {
             await using var db = DemoDb.Connect(cs);
-            // The delay keeps the row locks held long enough for the two runs to overlap.
-            var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs, delay: TimeSpan.FromMilliseconds(20)), new OutboxOptions { BatchSize = 10 });
+            // The delay keeps the row locks held long enough for the runs to overlap.
+            var inner = new BrokerLogPublisher(cs, delay: TimeSpan.FromMilliseconds(20));
+            var dispatcher = new OutboxDispatcher(db, new WorkerTaggingPublisher(n, handledBy, inner), new OutboxOptions { BatchSize = 10 });
             while ((await dispatcher.RunOnceAsync()).Claimed > 0) { }
         }
 
-        await Task.WhenAll(Worker(), Worker(), Worker());
+        await Task.WhenAll(Worker(1), Worker(2), Worker(3));
 
         await using var check = DemoDb.Connect(cs);
         var perMessage = await check.BrokerLog.GroupBy(b => b.MessageId).Select(g => g.Count()).ToListAsync();
         Assert.Equal(40, perMessage.Count);
         Assert.All(perMessage, count => Assert.Equal(1, count));
         Assert.Equal(40, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        // Proves the runs really overlapped: if one worker had finished everything alone, this would be 1.
+        Assert.True(handledBy.Values.Distinct().Count() > 1, "only one worker handled messages, so nothing overlapped");
+    }
+
+    [Fact]
+    public async Task A_dispatcher_skips_rows_another_transaction_has_locked_instead_of_waiting()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 10);
+
+        // Another dispatcher, mid-run: it holds the row locks of the five oldest messages.
+        await using var holder = new NpgsqlConnection(cs);
+        await holder.OpenAsync();
+        await using var holderTx = await holder.BeginTransactionAsync();
+        await using (var lockCmd = new NpgsqlCommand(
+            "SELECT id FROM outbox_messages ORDER BY created_at, id LIMIT 5 FOR UPDATE", holder, holderTx))
+            await lockCmd.ExecuteNonQueryAsync();
+
+        // With plain FOR UPDATE this call would block on those rows until the token fires, and the test fails.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using var db = DemoDb.Connect(cs);
+        var result = await new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 10 }).RunOnceAsync(timeout.Token);
+
+        Assert.Equal(5, result.Published);
+        await holderTx.RollbackAsync();
+
+        // Once the lock is gone the skipped five are picked up.
+        Assert.Equal(5, (await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync()).Published);
     }
 
     private sealed class PoisonPublisher(Guid poison, BrokerLogPublisher inner) : IOutboxPublisher
