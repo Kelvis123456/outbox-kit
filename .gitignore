@@ -6,3 +6,4 @@ TestResults/
 .env
 .env.*
 !.env.example
+.vercel
