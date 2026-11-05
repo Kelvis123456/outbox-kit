@@ -1,0 +1,7 @@
+# minimatch 10 llega solo por herramientas de desarrollo del sitio (eslint) y corre sobre patrones
+# de los archivos de configuración del propio repo, nunca sobre entrada de un visitante.
+# El sitio publicado es un export estático sin ese código. Se revisa cuando suba eslint.
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2026-12-15
+reason = "minimatch 10 solo en herramientas de desarrollo, no en el sitio estático publicado"
