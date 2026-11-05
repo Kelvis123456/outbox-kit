@@ -36,12 +36,70 @@ const groups = [
         what: "25 pending messages go out in batches of 10, 10 and 5, and all 25 end up processed.",
       },
       {
-        name: "Two_dispatchers_running_at_once_never_publish_the_same_message",
-        what: "Three dispatchers running at once publish each of 40 messages exactly once.",
+        name: "Three_dispatchers_running_at_once_never_publish_the_same_message",
+        what: "Three dispatchers running at once publish each of 40 messages exactly once, and more than one of them handled messages, so the runs overlapped.",
       },
+      {
+        name: "A_dispatcher_skips_rows_another_transaction_has_locked_instead_of_waiting",
+        what: "Another transaction holds the locks of five rows. The dispatcher publishes the other five without waiting, which plain FOR UPDATE would not do.",
+      },
+      {
+        name: "RunOnce_tells_a_batch_that_all_failed_apart_from_an_empty_queue",
+        what: "A run where every publish fails reports Failed and Claimed of 3. An empty queue reports Claimed of 0.",
+      },
+      {
+        name: "Options_that_would_never_make_progress_are_rejected",
+        what: "A batch size below 1 or MaxAttempts below 1 throws when the dispatcher is created (three cases).",
+      },
+    ],
+  },
+  {
+    name: "Failing",
+    tests: [
       {
         name: "A_poison_message_is_retried_then_parked_and_does_not_block_the_others",
         what: "A message the broker keeps rejecting is parked after three attempts. The other four still go out.",
+      },
+      {
+        name: "A_publisher_timeout_counts_as_a_failed_attempt_and_does_not_stall_the_queue",
+        what: "A TaskCanceledException from the publisher counts as one attempt. The other four go out and nothing is published twice. This is the test for the bug the audit found.",
+      },
+      {
+        name: "Cancelling_the_run_itself_still_rolls_back_and_throws",
+        what: "Cancelling the token you passed to RunOnceAsync aborts the run and rolls it back.",
+      },
+    ],
+  },
+  {
+    name: "The caller's context",
+    tests: [
+      {
+        name: "RunOnce_does_not_save_unrelated_pending_changes_on_the_callers_context",
+        what: "A row you added but did not save stays unsaved after a run, and still tracked as yours.",
+      },
+      {
+        name: "A_stale_tracked_row_cannot_make_the_dispatcher_lose_an_attempt",
+        what: "Two contexts failing the same row in turn count three attempts, not two.",
+      },
+      {
+        name: "The_change_tracker_does_not_grow_with_the_number_of_runs",
+        what: "After six runs over 30 messages the context tracks nothing.",
+      },
+      {
+        name: "Both_throw_a_clear_error_when_a_transaction_is_already_open",
+        what: "RunOnceAsync and HandleOnceAsync throw InvalidOperationException if the context already has a transaction.",
+      },
+      {
+        name: "HandleOnce_refuses_a_context_that_already_has_pending_changes",
+        what: "HandleOnceAsync throws instead of committing changes it did not make.",
+      },
+      {
+        name: "Dispatcher_and_consumer_work_on_a_context_with_EnableRetryOnFailure",
+        what: "Both go through the EF execution strategy, so a retrying context works.",
+      },
+      {
+        name: "Dispatcher_and_consumer_work_with_a_custom_default_schema",
+        what: "With HasDefaultSchema the raw SQL still finds the tables.",
       },
     ],
   },
@@ -59,6 +117,14 @@ const groups = [
       {
         name: "A_handler_that_throws_records_nothing_so_the_message_can_be_retried",
         what: "A failed handler leaves nothing in the inbox, so the retry runs it again.",
+      },
+      {
+        name: "A_failed_handler_can_be_retried_on_the_same_context_without_applying_the_effect_twice",
+        what: "After a failure the handler's added rows are dropped from the tracker, so a retry applies the effect once.",
+      },
+      {
+        name: "A_failed_handler_also_reverts_modified_entities",
+        what: "Entities the handler modified go back to their original values.",
       },
     ],
   },
@@ -83,8 +149,20 @@ const limits = [
     text: "The publish call runs inside the locking transaction, so a slow broker means a long transaction. Fine for modest volume. For more, move the lock to a short lease and publish outside the transaction.",
   },
   {
-    lead: "No ordering after a failure.",
-    text: "Once a message fails, later messages can go out before the earlier one is retried.",
+    lead: "No ordering guarantee at all.",
+    text: "created_at is stamped when you call Enqueue, not when the transaction commits, so a message can commit after a later one. Parallel dispatchers and retries reorder further. If order matters, put a sequence number in the payload and have the consumer check it.",
+  },
+  {
+    lead: "Your own transaction is not welcome.",
+    text: "RunOnceAsync and HandleOnceAsync open their own transaction and throw if the context already has one. HandleOnceAsync also throws if the context has pending changes.",
+  },
+  {
+    lead: "Retries can duplicate.",
+    text: "Both go through the EF execution strategy, so EnableRetryOnFailure works. After a transient failure a dispatcher run repeats and may publish a row again, so the consumer has to be idempotent anyway.",
+  },
+  {
+    lead: "The payload is normalized.",
+    text: "It is stored as jsonb, so Postgres changes key order and whitespace and collapses duplicate keys. Do not rely on byte-for-byte equality with what you enqueued.",
   },
   {
     lead: "No cleanup, no metrics.",
@@ -214,7 +292,9 @@ export default function Home() {
                   '\norder.MarkPaid();\ndb.Enqueue("order.paid", JsonSerializer.Serialize(new { order.Id }));\nawait db.SaveChangesAsync();\n\n'
                 }
                 <span className="c">{"// in a background loop"}</span>
-                {"\nvar published = await new OutboxDispatcher(db, myPublisher).RunOnceAsync();\n\n"}
+                {
+                  "\nvar dispatcher = new OutboxDispatcher(db, myPublisher);\nwhile ((await dispatcher.RunOnceAsync()).Claimed > 0) {}\n\n"
+                }
                 <span className="c">{"// in the consumer"}</span>
                 {'\nawait db.HandleOnceAsync("billing", messageId, async ct => { '}
                 <span className="c">{"/* change your own tables */"}</span>
@@ -226,11 +306,16 @@ export default function Home() {
 
         <section id="tests" className="section border-t border-rule">
           <div className="wrap">
-            <h2 className="text-[clamp(1.9rem,4vw,3rem)] font-extrabold">Nine tests against a real Postgres.</h2>
+            <h2 className="text-[clamp(1.9rem,4vw,3rem)] font-extrabold">25 tests against a real Postgres.</h2>
             <p className="mt-4 max-w-[44rem] text-lg text-muted">
               <code className="text-[0.9em]">dotnet test</code> needs Docker: it starts{" "}
               <code className="text-[0.9em]">postgres:17-alpine</code> with Testcontainers. The broker is a stand-in
               that writes to a table on its own connection, so a rollback cannot erase a publish.
+            </p>
+            <p className="mt-4 max-w-[44rem] text-muted">
+              An independent audit found a real bug: a publisher timeout was never counted as an attempt, so a message
+              could be republished forever. It is fixed and has its own test below. The decisions that came out of it
+              are in <a href={DECISIONS_URL}>docs/decisions.md</a>.
             </p>
 
             <div className="mt-12 max-w-[52rem]">
@@ -287,8 +372,8 @@ export default function Home() {
           <div className="wrap">
             <h2 className="text-[clamp(1.9rem,4vw,3rem)] font-extrabold">What it does not do.</h2>
             <p className="mt-4 max-w-[40rem] text-lg text-muted">
-              This is a short reference implementation, not a replacement for MassTransit or Wolverine. Read these
-              before you copy it.
+              This is a short reference implementation (about 300 lines), not a replacement for MassTransit or
+              Wolverine. Read these before you copy it.
             </p>
             <dl className="m-0 mt-12 grid grid-cols-[minmax(0,1fr)] gap-x-16 gap-y-9 md:grid-cols-2">
               {limits.map((l) => (
