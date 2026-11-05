@@ -36,7 +36,7 @@ public sealed class SchemaTests(PostgresFixture pg)
         await db.SaveChangesAsync();
 
         var publisher = new ListPublisher();
-        Assert.Equal(1, await new OutboxDispatcher(db, publisher).RunOnceAsync());
+        Assert.Equal(1, (await new OutboxDispatcher(db, publisher).RunOnceAsync()).Published);
         Assert.Equal([message.Id], publisher.Sent);
 
         Assert.True(await db.HandleOnceAsync("billing", message.Id, _ => Task.CompletedTask));

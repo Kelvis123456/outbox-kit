@@ -28,7 +28,8 @@ db.Enqueue("order.paid", JsonSerializer.Serialize(new { order.Id }));
 await db.SaveChangesAsync();
 
 // in a background loop
-var published = await new OutboxDispatcher(db, myPublisher).RunOnceAsync();
+var result = await new OutboxDispatcher(db, myPublisher).RunOnceAsync();
+// result.Published, result.Failed; loop while result.Claimed > 0 to drain
 
 // in the consumer
 await db.HandleOnceAsync("billing", messageId, async ct => { /* change your own tables */ });

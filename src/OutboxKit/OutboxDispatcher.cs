@@ -8,6 +8,15 @@ public interface IOutboxPublisher
     Task PublishAsync(OutboxMessage message, CancellationToken ct);
 }
 
+/// <summary>What one run did. Drain loops should test <see cref="Claimed"/>, not <see cref="Published"/>.</summary>
+/// <param name="Published">Messages the publisher accepted and that are now marked processed.</param>
+/// <param name="Failed">Messages whose publish threw: one more attempt counted, or parked at MaxAttempts.</param>
+public sealed record DispatchResult(int Published, int Failed)
+{
+    /// <summary>Rows the run picked up. Zero means nothing was pending, even if every publish in an earlier run failed.</summary>
+    public int Claimed => Published + Failed;
+}
+
 public sealed record OutboxOptions
 {
     public int BatchSize { get; init; } = 50;
@@ -44,13 +53,12 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
         return o;
     }
 
-    /// <returns>How many messages were published in this run.</returns>
-    public Task<int> RunOnceAsync(CancellationToken ct = default) =>
+    public Task<DispatchResult> RunOnceAsync(CancellationToken ct = default) =>
         // Goes through the execution strategy so a context configured with EnableRetryOnFailure works.
         // On a transient failure the whole run repeats, which can publish a row again (at-least-once).
         db.Database.CreateExecutionStrategy().ExecuteAsync(this, static (self, token) => self.RunAttemptAsync(token), ct);
 
-    private async Task<int> RunAttemptAsync(CancellationToken ct)
+    private async Task<DispatchResult> RunAttemptAsync(CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
@@ -62,6 +70,7 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
             .ToListAsync(ct);
 
         var published = 0;
+        var failed = 0;
         foreach (var message in batch)
         {
             var id = message.Id;
@@ -90,6 +99,7 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
                 var attempts = message.Attempts + 1; // the row is locked, so the value we read is current
                 var error = failure.Message;
                 DateTimeOffset? failedAt = attempts >= _options.MaxAttempts ? _clock.GetUtcNow() : null;
+                failed++;
                 await db.Set<OutboxMessage>().Where(m => m.Id == id).ExecuteUpdateAsync(s => s
                     .SetProperty(m => m.Attempts, attempts)
                     .SetProperty(m => m.Error, error)
@@ -98,6 +108,6 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
         }
 
         await tx.CommitAsync(ct);
-        return published;
+        return new DispatchResult(published, failed);
     }
 }

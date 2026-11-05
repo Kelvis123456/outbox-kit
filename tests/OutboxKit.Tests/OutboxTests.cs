@@ -54,10 +54,10 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var db = DemoDb.Connect(cs);
         var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 10 });
 
-        Assert.Equal(10, await dispatcher.RunOnceAsync());
-        Assert.Equal(10, await dispatcher.RunOnceAsync());
-        Assert.Equal(5, await dispatcher.RunOnceAsync());
-        Assert.Equal(0, await dispatcher.RunOnceAsync());
+        Assert.Equal(10, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(10, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(5, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(0, (await dispatcher.RunOnceAsync()).Published);
 
         await using var check = DemoDb.Connect(cs);
         Assert.Equal(25, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
@@ -75,7 +75,7 @@ public sealed class OutboxTests(PostgresFixture pg)
             await using var db = DemoDb.Connect(cs);
             // The delay keeps the row locks held long enough for the two runs to overlap.
             var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs, delay: TimeSpan.FromMilliseconds(20)), new OutboxOptions { BatchSize = 10 });
-            while (await dispatcher.RunOnceAsync() > 0) { }
+            while ((await dispatcher.RunOnceAsync()).Claimed > 0) { }
         }
 
         await Task.WhenAll(Worker(), Worker(), Worker());
@@ -105,10 +105,10 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var db = DemoDb.Connect(cs);
         var dispatcher = new OutboxDispatcher(db, new PoisonPublisher(poison, new BrokerLogPublisher(cs)), new OutboxOptions { BatchSize = 10, MaxAttempts = 3 });
 
-        Assert.Equal(4, await dispatcher.RunOnceAsync()); // the other four go out on the first run
+        Assert.Equal(4, (await dispatcher.RunOnceAsync()).Published); // the other four go out on the first run
         await dispatcher.RunOnceAsync();
         await dispatcher.RunOnceAsync();
-        Assert.Equal(0, await dispatcher.RunOnceAsync()); // parked after 3 attempts, so nothing is left to try
+        Assert.Equal(0, (await dispatcher.RunOnceAsync()).Published); // parked after 3 attempts, so nothing is left to try
 
         await using var check = DemoDb.Connect(cs);
         var parked = await check.Set<OutboxMessage>().SingleAsync(m => m.Id == poison);
@@ -138,7 +138,7 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var db = DemoDb.Connect(cs);
         var dispatcher = new OutboxDispatcher(db, new TimeoutPublisher(victim, new BrokerLogPublisher(cs)), new OutboxOptions { BatchSize = 10, MaxAttempts = 3 });
 
-        Assert.Equal(4, await dispatcher.RunOnceAsync());
+        Assert.Equal(4, (await dispatcher.RunOnceAsync()).Published);
 
         await using var check = DemoDb.Connect(cs);
         var stuck = await check.Set<OutboxMessage>().SingleAsync(m => m.Id == victim);
@@ -230,6 +230,25 @@ public sealed class OutboxTests(PostgresFixture pg)
         var options = new OutboxOptions { BatchSize = batchSize, MaxAttempts = maxAttempts };
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new OutboxDispatcher(db, new BrokerLogPublisher(cs), options));
+    }
+
+    [Fact]
+    public async Task RunOnce_tells_a_batch_that_all_failed_apart_from_an_empty_queue()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new AlwaysFailsPublisher(), new OutboxOptions { MaxAttempts = 2 });
+
+        var first = await dispatcher.RunOnceAsync();
+        Assert.Equal(0, first.Published);
+        Assert.Equal(3, first.Failed);
+        Assert.Equal(3, first.Claimed); // a loop on Published would stop here with 3 rows still retryable
+
+        await dispatcher.RunOnceAsync(); // second attempt parks them
+        var empty = await dispatcher.RunOnceAsync();
+        Assert.Equal(0, empty.Claimed);
     }
 
     [Fact]
@@ -351,7 +370,7 @@ public sealed class OutboxTests(PostgresFixture pg)
         await SeedAsync(cs, 3);
 
         await using var db = DemoDb.Connect(cs, retryOnFailure: true);
-        Assert.Equal(3, await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync());
+        Assert.Equal(3, (await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync()).Published);
 
         var id = Guid.NewGuid();
         Assert.True(await db.HandleOnceAsync("billing", id, _ =>
