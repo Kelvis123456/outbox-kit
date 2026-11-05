@@ -2,7 +2,7 @@
 
 A small .NET library for the transactional outbox pattern on EF Core and PostgreSQL, plus an idempotent consumer. I wrote it after building [transfer-ledger](https://github.com/Kelvis123456/transfer-ledger) and [webhook-inbox](https://github.com/Kelvis123456/webhook-inbox), because both ran into the same problem from opposite ends: how do you change your database and tell another system about it, without one happening and the other not.
 
-It is a short reference implementation, not a replacement for MassTransit or Wolverine. It is about 150 lines, and the tests prove its guarantees against a real PostgreSQL, including a test that kills the process mid-dispatch.
+It is a short reference implementation, not a replacement for MassTransit or Wolverine. It is about 300 lines, and the tests prove its guarantees against a real PostgreSQL, including a test that kills the process mid-dispatch.
 
 ## The problem
 
@@ -28,7 +28,8 @@ db.Enqueue("order.paid", JsonSerializer.Serialize(new { order.Id }));
 await db.SaveChangesAsync();
 
 // in a background loop
-var published = await new OutboxDispatcher(db, myPublisher).RunOnceAsync();
+var result = await new OutboxDispatcher(db, myPublisher).RunOnceAsync();
+// result.Published, result.Failed; loop while result.Claimed > 0 to drain
 
 // in the consumer
 await db.HandleOnceAsync("billing", messageId, async ct => { /* change your own tables */ });
@@ -36,13 +37,15 @@ await db.HandleOnceAsync("billing", messageId, async ct => { /* change your own 
 
 ## What the tests prove
 
-`dotnet test` needs Docker (it starts `postgres:17-alpine` with Testcontainers). 9 tests:
+`dotnet test` needs Docker (it starts `postgres:17-alpine` with Testcontainers). 25 tests:
 
 - a failing save leaves neither the business row nor the message
-- three dispatchers running at once publish each of 40 messages exactly once
-- a message the broker keeps rejecting is retried, then parked after `MaxAttempts`, and the rest still go out
-- the idempotent consumer runs a handler once for the same message, keeps consumers separate, and records nothing when the handler throws
-- **the chaos test:** a separate process publishes three messages and is killed with `Environment.FailFast` before the commit. Nothing is marked processed, the broker already has three. A second worker finishes the job. All 20 messages are processed (none lost), the broker received 23 publishes (three duplicates), and a consumer that replays every one of them twice applies each effect exactly once.
+- three dispatchers running at once publish each of 40 messages exactly once, and more than one of them really handled messages, so the runs overlapped. That test alone would also pass with a plain `FOR UPDATE`, which just makes the dispatchers wait for each other. A separate test holds the locks of five rows in another transaction and checks that the dispatcher publishes the other five without waiting, which is what `SKIP LOCKED` adds
+- a message the broker keeps rejecting is retried, then parked after `MaxAttempts`, and the rest still go out. A publisher timeout (`TaskCanceledException`) counts as a failed attempt too, and only cancelling the run itself aborts it
+- the dispatcher never touches the change tracker of the context you give it: pending changes there are not saved, a stale tracked row cannot lose an attempt, and the tracker does not grow
+- the dispatcher and the consumer work with `EnableRetryOnFailure` and with `HasDefaultSchema`
+- the idempotent consumer runs a handler once for the same message, keeps consumers separate, and records nothing when the handler throws. After a failure it reverts what the handler changed, so a retry on the same context applies the effect once
+- **the chaos test:** a separate process publishes three messages and is killed with `Environment.FailFast` before the commit. Nothing is marked processed, the broker already has three. A second worker finishes the job. All 20 messages are processed (none lost), the broker received 23 publishes (three duplicates), and a consumer that replays every one of them twice, one after another (not concurrently), applies each effect exactly once.
 
 The duplicates in that last test are the point. The outbox gives you at-least-once delivery. The inbox is what turns that into one effect per message.
 
@@ -50,7 +53,9 @@ The duplicates in that last test are the point. The outbox gives you at-least-on
 
 - PostgreSQL only. It uses `FOR UPDATE SKIP LOCKED`, `jsonb` and `ON CONFLICT DO NOTHING`.
 - The publish call runs while the row locks are held. A slow broker means a long transaction. Fine for modest volume; if you need more, move the lock to a short lease and publish outside the transaction.
-- No ordering guarantee once a message fails: later messages can go out before an earlier one is retried.
+- No ordering guarantee at all. `created_at` is stamped when you call `Enqueue`, not when the transaction commits, so a message can commit after a later one. Several dispatchers publish in parallel and a failed message is retried after later ones. If order matters, put a sequence number in the payload and have the consumer check it.
+- `RunOnceAsync` and `HandleOnceAsync` open their own transaction and throw `InvalidOperationException` if the context already has one open. `HandleOnceAsync` also throws if the context has pending changes. Both go through the EF execution strategy, so `EnableRetryOnFailure` works; after a transient failure the dispatcher run repeats and may publish a row again.
+- The payload is stored as `jsonb`, so Postgres normalizes it (key order, whitespace, duplicate keys). Do not rely on byte-for-byte equality with what you enqueued.
 - No cleanup of processed rows and no metrics. You will want a job that deletes old `outbox_messages` and `inbox_messages`.
 - I did not benchmark it, so I make no throughput claim.
 - Not published to NuGet. Clone the repo to use it.

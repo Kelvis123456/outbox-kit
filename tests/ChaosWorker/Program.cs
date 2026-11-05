@@ -21,5 +21,5 @@ if (mode == "crash")
 else
 {
     var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(connectionString), new OutboxOptions { BatchSize = 10 });
-    while (await dispatcher.RunOnceAsync() > 0) { }
+    while ((await dispatcher.RunOnceAsync()).Claimed > 0) { }
 }

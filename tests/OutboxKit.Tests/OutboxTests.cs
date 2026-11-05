@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ChaosWorker;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -54,37 +55,76 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var db = DemoDb.Connect(cs);
         var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 10 });
 
-        Assert.Equal(10, await dispatcher.RunOnceAsync());
-        Assert.Equal(10, await dispatcher.RunOnceAsync());
-        Assert.Equal(5, await dispatcher.RunOnceAsync());
-        Assert.Equal(0, await dispatcher.RunOnceAsync());
+        Assert.Equal(10, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(10, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(5, (await dispatcher.RunOnceAsync()).Published);
+        Assert.Equal(0, (await dispatcher.RunOnceAsync()).Published);
 
         await using var check = DemoDb.Connect(cs);
         Assert.Equal(25, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
         Assert.Equal(25, await check.BrokerLog.CountAsync());
     }
 
+    private sealed class WorkerTaggingPublisher(int worker, ConcurrentDictionary<Guid, int> handledBy, IOutboxPublisher inner) : IOutboxPublisher
+    {
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct)
+        {
+            handledBy[message.Id] = worker;
+            return inner.PublishAsync(message, ct);
+        }
+    }
+
     [Fact]
-    public async Task Two_dispatchers_running_at_once_never_publish_the_same_message()
+    public async Task Three_dispatchers_running_at_once_never_publish_the_same_message()
     {
         var cs = await pg.NewDatabaseAsync();
         await SeedAsync(cs, 40);
+        var handledBy = new ConcurrentDictionary<Guid, int>();
 
-        async Task Worker()
+        async Task Worker(int n)
         {
             await using var db = DemoDb.Connect(cs);
-            // The delay keeps the row locks held long enough for the two runs to overlap.
-            var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs, delay: TimeSpan.FromMilliseconds(20)), new OutboxOptions { BatchSize = 10 });
-            while (await dispatcher.RunOnceAsync() > 0) { }
+            // The delay keeps the row locks held long enough for the runs to overlap.
+            var inner = new BrokerLogPublisher(cs, delay: TimeSpan.FromMilliseconds(20));
+            var dispatcher = new OutboxDispatcher(db, new WorkerTaggingPublisher(n, handledBy, inner), new OutboxOptions { BatchSize = 10 });
+            while ((await dispatcher.RunOnceAsync()).Claimed > 0) { }
         }
 
-        await Task.WhenAll(Worker(), Worker(), Worker());
+        await Task.WhenAll(Worker(1), Worker(2), Worker(3));
 
         await using var check = DemoDb.Connect(cs);
         var perMessage = await check.BrokerLog.GroupBy(b => b.MessageId).Select(g => g.Count()).ToListAsync();
         Assert.Equal(40, perMessage.Count);
         Assert.All(perMessage, count => Assert.Equal(1, count));
         Assert.Equal(40, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        // Proves the runs really overlapped: if one worker had finished everything alone, this would be 1.
+        Assert.True(handledBy.Values.Distinct().Count() > 1, "only one worker handled messages, so nothing overlapped");
+    }
+
+    [Fact]
+    public async Task A_dispatcher_skips_rows_another_transaction_has_locked_instead_of_waiting()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 10);
+
+        // Another dispatcher, mid-run: it holds the row locks of the five oldest messages.
+        await using var holder = new NpgsqlConnection(cs);
+        await holder.OpenAsync();
+        await using var holderTx = await holder.BeginTransactionAsync();
+        await using (var lockCmd = new NpgsqlCommand(
+            "SELECT id FROM outbox_messages ORDER BY created_at, id LIMIT 5 FOR UPDATE", holder, holderTx))
+            await lockCmd.ExecuteNonQueryAsync();
+
+        // With plain FOR UPDATE this call would block on those rows until the token fires, and the test fails.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using var db = DemoDb.Connect(cs);
+        var result = await new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 10 }).RunOnceAsync(timeout.Token);
+
+        Assert.Equal(5, result.Published);
+        await holderTx.RollbackAsync();
+
+        // Once the lock is gone the skipped five are picked up.
+        Assert.Equal(5, (await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync()).Published);
     }
 
     private sealed class PoisonPublisher(Guid poison, BrokerLogPublisher inner) : IOutboxPublisher
@@ -105,10 +145,10 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var db = DemoDb.Connect(cs);
         var dispatcher = new OutboxDispatcher(db, new PoisonPublisher(poison, new BrokerLogPublisher(cs)), new OutboxOptions { BatchSize = 10, MaxAttempts = 3 });
 
-        Assert.Equal(4, await dispatcher.RunOnceAsync()); // the other four go out on the first run
+        Assert.Equal(4, (await dispatcher.RunOnceAsync()).Published); // the other four go out on the first run
         await dispatcher.RunOnceAsync();
         await dispatcher.RunOnceAsync();
-        Assert.Equal(0, await dispatcher.RunOnceAsync()); // parked after 3 attempts, so nothing is left to try
+        Assert.Equal(0, (await dispatcher.RunOnceAsync()).Published); // parked after 3 attempts, so nothing is left to try
 
         await using var check = DemoDb.Connect(cs);
         var parked = await check.Set<OutboxMessage>().SingleAsync(m => m.Id == poison);
@@ -117,6 +157,138 @@ public sealed class OutboxTests(PostgresFixture pg)
         Assert.Null(parked.ProcessedAt);
         Assert.Equal("broker rejected it", parked.Error);
         Assert.Equal(4, await check.BrokerLog.CountAsync());
+    }
+
+    private sealed class TimeoutPublisher(Guid victim, BrokerLogPublisher inner) : IOutboxPublisher
+    {
+        // HttpClient.Timeout surfaces as TaskCanceledException even though nobody cancelled our token.
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct) =>
+            message.Id == victim ? throw new TaskCanceledException("the broker call timed out") : inner.PublishAsync(message, ct);
+    }
+
+    [Fact]
+    public async Task A_publisher_timeout_counts_as_a_failed_attempt_and_does_not_stall_the_queue()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 5);
+        Guid victim;
+        await using (var seedCheck = DemoDb.Connect(cs))
+            victim = (await seedCheck.Set<OutboxMessage>().OrderBy(m => m.CreatedAt).Skip(2).FirstAsync()).Id;
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new TimeoutPublisher(victim, new BrokerLogPublisher(cs)), new OutboxOptions { BatchSize = 10, MaxAttempts = 3 });
+
+        Assert.Equal(4, (await dispatcher.RunOnceAsync()).Published);
+
+        await using var check = DemoDb.Connect(cs);
+        var stuck = await check.Set<OutboxMessage>().SingleAsync(m => m.Id == victim);
+        Assert.Equal(1, stuck.Attempts);
+        Assert.Equal(4, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        Assert.Equal(4, await check.BrokerLog.CountAsync()); // and nobody is published twice
+    }
+
+    [Fact]
+    public async Task Cancelling_the_run_itself_still_rolls_back_and_throws()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+        using var cts = new CancellationTokenSource();
+
+        await using var db = DemoDb.Connect(cs);
+        var publisher = new BrokerLogPublisher(cs, afterPublish: n => { if (n == 2) cts.Cancel(); }, delay: TimeSpan.FromMilliseconds(5));
+        var dispatcher = new OutboxDispatcher(db, publisher);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dispatcher.RunOnceAsync(cts.Token));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null || m.Attempts > 0));
+    }
+
+    private sealed class AlwaysFailsPublisher : IOutboxPublisher
+    {
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct) => throw new InvalidOperationException("down");
+    }
+
+    [Fact]
+    public async Task RunOnce_does_not_save_unrelated_pending_changes_on_the_callers_context()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs);
+        var pending = new Delivery { MessageId = Guid.NewGuid() };
+        db.Deliveries.Add(pending);
+
+        await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync();
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Deliveries.CountAsync());
+        Assert.Equal(EntityState.Added, db.Entry(pending).State); // still the caller's to save
+    }
+
+    [Fact]
+    public async Task A_stale_tracked_row_cannot_make_the_dispatcher_lose_an_attempt()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 1);
+        var options = new OutboxOptions { MaxAttempts = 10 };
+
+        await using var first = DemoDb.Connect(cs);
+        await using var second = DemoDb.Connect(cs);
+        var a = new OutboxDispatcher(first, new AlwaysFailsPublisher(), options);
+        var b = new OutboxDispatcher(second, new AlwaysFailsPublisher(), options);
+
+        await a.RunOnceAsync(); // attempts = 1, and `first` may still remember that
+        await b.RunOnceAsync(); // attempts = 2
+        await a.RunOnceAsync(); // must be 3, not 2
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(3, (await check.Set<OutboxMessage>().SingleAsync()).Attempts);
+    }
+
+    [Fact]
+    public async Task The_change_tracker_does_not_grow_with_the_number_of_runs()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 30);
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 5 });
+        for (var i = 0; i < 6; i++) await dispatcher.RunOnceAsync();
+
+        Assert.Empty(db.ChangeTracker.Entries());
+    }
+
+    [Theory]
+    [InlineData(0, 5)]
+    [InlineData(-1, 5)]
+    [InlineData(10, 0)]
+    public async Task Options_that_would_never_make_progress_are_rejected(int batchSize, int maxAttempts)
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        var options = new OutboxOptions { BatchSize = batchSize, MaxAttempts = maxAttempts };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new OutboxDispatcher(db, new BrokerLogPublisher(cs), options));
+    }
+
+    [Fact]
+    public async Task RunOnce_tells_a_batch_that_all_failed_apart_from_an_empty_queue()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new AlwaysFailsPublisher(), new OutboxOptions { MaxAttempts = 2 });
+
+        var first = await dispatcher.RunOnceAsync();
+        Assert.Equal(0, first.Published);
+        Assert.Equal(3, first.Failed);
+        Assert.Equal(3, first.Claimed); // a loop on Published would stop here with 3 rows still retryable
+
+        await dispatcher.RunOnceAsync(); // second attempt parks them
+        var empty = await dispatcher.RunOnceAsync();
+        Assert.Equal(0, empty.Claimed);
     }
 
     [Fact]
@@ -166,6 +338,102 @@ public sealed class OutboxTests(PostgresFixture pg)
         await using var retry = DemoDb.Connect(cs);
         Assert.Equal(0, await retry.Set<InboxMessage>().CountAsync());
         Assert.True(await retry.HandleOnceAsync("billing", id, _ => Task.CompletedTask));
+    }
+
+    [Fact]
+    public async Task A_failed_handler_can_be_retried_on_the_same_context_without_applying_the_effect_twice()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        var id = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            throw new InvalidOperationException("boom");
+        }));
+        Assert.Empty(db.ChangeTracker.Entries()); // the failed attempt left nothing queued
+
+        Assert.True(await db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            return Task.CompletedTask;
+        }));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(1, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
+    public async Task A_failed_handler_also_reverts_modified_entities()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using (var seed = DemoDb.Connect(cs))
+        {
+            seed.Deliveries.Add(new Delivery { MessageId = Guid.Empty });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = DemoDb.Connect(cs);
+        var row = await db.Deliveries.SingleAsync();
+        var id = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", id, _ =>
+        {
+            row.MessageId = id;
+            throw new InvalidOperationException("boom");
+        }));
+
+        Assert.Equal(Guid.Empty, row.MessageId);
+        Assert.False(db.ChangeTracker.HasChanges());
+    }
+
+    [Fact]
+    public async Task HandleOnce_refuses_a_context_that_already_has_pending_changes()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        db.Deliveries.Add(new Delivery { MessageId = Guid.NewGuid() });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            db.HandleOnceAsync("billing", Guid.NewGuid(), _ => Task.CompletedTask));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Set<InboxMessage>().CountAsync());
+        Assert.Equal(0, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
+    public async Task Dispatcher_and_consumer_work_on_a_context_with_EnableRetryOnFailure()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs, retryOnFailure: true);
+        Assert.Equal(3, (await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync()).Published);
+
+        var id = Guid.NewGuid();
+        Assert.True(await db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            return Task.CompletedTask;
+        }));
+        Assert.False(await db.HandleOnceAsync("billing", id, _ => Task.CompletedTask));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(3, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        Assert.Equal(1, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
+    public async Task Both_throw_a_clear_error_when_a_transaction_is_already_open()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        await using var tx = await db.Database.BeginTransactionAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", Guid.NewGuid(), _ => Task.CompletedTask));
     }
 
     [Fact]

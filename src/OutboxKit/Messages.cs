@@ -5,6 +5,7 @@ public sealed class OutboxMessage
 {
     public Guid Id { get; set; }
     public string Type { get; set; } = "";
+    /// <summary>JSON text. It is stored as jsonb, so Postgres normalizes it: key order and whitespace change, duplicate keys collapse.</summary>
     public string Payload { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ProcessedAt { get; set; }
