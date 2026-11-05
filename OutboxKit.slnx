@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OutboxKit/OutboxKit.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ChaosWorker/ChaosWorker.csproj" />
+    <Project Path="tests/OutboxKit.Tests/OutboxKit.Tests.csproj" />
+  </Folder>
+</Solution>
