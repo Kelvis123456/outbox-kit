@@ -119,6 +119,51 @@ public sealed class OutboxTests(PostgresFixture pg)
         Assert.Equal(4, await check.BrokerLog.CountAsync());
     }
 
+    private sealed class TimeoutPublisher(Guid victim, BrokerLogPublisher inner) : IOutboxPublisher
+    {
+        // HttpClient.Timeout surfaces as TaskCanceledException even though nobody cancelled our token.
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct) =>
+            message.Id == victim ? throw new TaskCanceledException("the broker call timed out") : inner.PublishAsync(message, ct);
+    }
+
+    [Fact]
+    public async Task A_publisher_timeout_counts_as_a_failed_attempt_and_does_not_stall_the_queue()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 5);
+        Guid victim;
+        await using (var seedCheck = DemoDb.Connect(cs))
+            victim = (await seedCheck.Set<OutboxMessage>().OrderBy(m => m.CreatedAt).Skip(2).FirstAsync()).Id;
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new TimeoutPublisher(victim, new BrokerLogPublisher(cs)), new OutboxOptions { BatchSize = 10, MaxAttempts = 3 });
+
+        Assert.Equal(4, await dispatcher.RunOnceAsync());
+
+        await using var check = DemoDb.Connect(cs);
+        var stuck = await check.Set<OutboxMessage>().SingleAsync(m => m.Id == victim);
+        Assert.Equal(1, stuck.Attempts);
+        Assert.Equal(4, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        Assert.Equal(4, await check.BrokerLog.CountAsync()); // and nobody is published twice
+    }
+
+    [Fact]
+    public async Task Cancelling_the_run_itself_still_rolls_back_and_throws()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+        using var cts = new CancellationTokenSource();
+
+        await using var db = DemoDb.Connect(cs);
+        var publisher = new BrokerLogPublisher(cs, afterPublish: n => { if (n == 2) cts.Cancel(); }, delay: TimeSpan.FromMilliseconds(5));
+        var dispatcher = new OutboxDispatcher(db, publisher);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dispatcher.RunOnceAsync(cts.Token));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null || m.Attempts > 0));
+    }
+
     [Fact]
     public async Task Idempotent_consumer_runs_the_handler_once_per_message_even_when_called_twice()
     {

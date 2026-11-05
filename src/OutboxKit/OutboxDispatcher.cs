@@ -58,7 +58,9 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
                 message.Error = null;
                 published++;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // Only our own cancellation aborts the run. A cancellation the publisher raises (an HttpClient
+            // timeout, say) is an ordinary failed attempt, otherwise the row would never count it.
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 message.Attempts++;
                 message.Error = ex.Message;
