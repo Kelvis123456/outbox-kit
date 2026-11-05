@@ -1,0 +1,413 @@
+@import "tailwindcss";
+
+/*
+  Identity: a dispatch board. Cool slate paper, navy ink, one signal vermilion that only ever means
+  "this went wrong or got duplicated". Sans display with a body grotesque, mono only for code.
+  Every text pair is checked in scripts/contrast.mjs (run it after touching a token).
+*/
+:root {
+  color-scheme: light;
+  --bg: #f1f4f7;
+  --surface: #fafbfc;
+  --ink: #101c28;
+  --muted: #435465;
+  --accent: #b0300e;
+  --tint: #f9e6df;
+  --line: #6c7d8f; /* strokes that carry meaning (lifelines, boxes): 3:1 against bg */
+  --rule: #ccd4dc; /* decorative hairlines only */
+  --radius: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e1721;
+    --surface: #152130;
+    --ink: #e6ecf1;
+    --muted: #9daebe;
+    --accent: #ff9272;
+    --tint: #2e1d1c;
+    --line: #5f7387;
+    --rule: #263545;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-tint: var(--tint);
+  --color-line: var(--line);
+  --color-rule: var(--rule);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
+}
+
+html {
+  background: var(--bg);
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family:
+    var(--font-body),
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display), system-ui, sans-serif;
+  text-wrap: balance;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-code), ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.2em;
+  text-decoration-thickness: 1px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -4rem;
+  padding: 0.6rem 1rem;
+  background: var(--ink);
+  color: var(--bg);
+  border-radius: var(--radius);
+  z-index: 50;
+}
+.skip-link:focus {
+  top: 1rem;
+}
+
+/* buttons: one shape, two weights */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0 1.15rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid var(--ink);
+  cursor: pointer;
+  transition-property: scale, background-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
+.btn:active {
+  scale: 0.96;
+}
+.btn-solid {
+  background: var(--ink);
+  color: var(--bg);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn-ghost:hover {
+    background: var(--ink);
+    color: var(--bg);
+  }
+  .btn-solid:hover {
+    background: var(--muted);
+    border-color: var(--muted);
+  }
+}
+
+/* code */
+.code {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.7;
+  padding: 1.1rem 1.25rem;
+  tab-size: 4;
+}
+.code .c {
+  color: var(--muted);
+}
+.code .k {
+  color: var(--accent);
+}
+
+.section {
+  padding-block: clamp(4rem, 9vw, 7rem);
+}
+.wrap {
+  width: 100%;
+  max-width: 72rem;
+  margin-inline: auto;
+  padding-inline: clamp(1rem, 4vw, 2rem);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- failure diagram ---------- */
+.dg-svg text {
+  font-family: var(--font-body), system-ui, sans-serif;
+  fill: var(--ink);
+}
+.dg-svg .actor rect {
+  fill: var(--surface);
+  stroke: var(--line);
+}
+.dg-svg .actor text {
+  font-size: 14px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+.dg-svg .life {
+  stroke: var(--line);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 5;
+}
+.dg-svg .arrow line {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.dg-svg .arrow polygon {
+  fill: var(--ink);
+}
+.dg-svg .arrow text {
+  font-size: 13px;
+  font-weight: 600;
+}
+.dg-svg .bad line {
+  stroke: var(--accent);
+}
+.dg-svg .bad polygon {
+  fill: var(--accent);
+}
+.dg-svg .bad text,
+.dg-svg .note.bad text {
+  fill: var(--accent);
+}
+.dg-svg .ghost line {
+  stroke-dasharray: 5 5;
+}
+.dg-svg .note rect {
+  fill: var(--surface);
+  stroke: var(--line);
+}
+.dg-svg .note.bad rect {
+  fill: var(--tint);
+  stroke: var(--accent);
+}
+.dg-svg .note.good rect {
+  fill: var(--ink);
+  stroke: var(--ink);
+}
+.dg-svg .note.good text {
+  fill: var(--bg);
+}
+.dg-svg .note text {
+  font-size: 12.5px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+.dg-svg .cross line {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.dg-svg .verdict text {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-size: 19px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+.dg-svg .verdict.bad text {
+  fill: var(--accent);
+}
+
+/* reveal: draw the arrow, then fade the head and label. Only transform/opacity/dashoffset. */
+.dg-svg .ev {
+  opacity: 0;
+  transition: opacity 260ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.dg-svg .ev.on {
+  opacity: 1;
+}
+.dg-svg .arrow line,
+.dg-svg .arrow:not(.ghost) line {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition: stroke-dashoffset 520ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.dg-svg .arrow.ghost line {
+  stroke-dasharray: 5 5;
+  stroke-dashoffset: 0;
+}
+.dg-svg .ev.on line {
+  stroke-dashoffset: 0;
+}
+.dg-svg .arrow polygon,
+.dg-svg .arrow text {
+  opacity: 0;
+  transition: opacity 200ms ease 380ms;
+}
+.dg-svg .ev.on polygon,
+.dg-svg .ev.on text {
+  opacity: 1;
+}
+.dg-svg .note,
+.dg-svg .cross,
+.dg-svg .verdict {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.dg-svg .note.ev:not(.on),
+.dg-svg .cross.ev:not(.on) {
+  transform: scale(0.94);
+}
+.dg-svg .note.ev,
+.dg-svg .cross.ev {
+  transition:
+    opacity 260ms cubic-bezier(0.23, 1, 0.32, 1) 300ms,
+    transform 260ms cubic-bezier(0.23, 1, 0.32, 1) 300ms;
+}
+
+/* reduced motion: show everything, no transitions. The story is the same, nothing moves. */
+.dg-static .ev,
+.dg-static .ev * {
+  transition: none !important;
+}
+.dg-static .ev {
+  opacity: 1;
+  transform: none !important;
+}
+.dg-static .arrow line {
+  stroke-dashoffset: 0 !important;
+}
+.dg-static .arrow polygon,
+.dg-static .arrow text {
+  opacity: 1 !important;
+}
+
+.step-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  cursor: pointer;
+  font: inherit;
+  transition-property: background-color, color, border-color;
+  transition-duration: 160ms;
+}
+.step-btn[aria-current="step"] {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line);
+}
+.step-btn[data-bad="true"][aria-current="step"] {
+  border-color: var(--accent);
+}
+@media (hover: hover) and (pointer: fine) {
+  .step-btn:hover {
+    color: var(--ink);
+  }
+}
+.step-btn strong {
+  display: block;
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-size: 1.02rem;
+  letter-spacing: -0.01em;
+}
+
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition-property: scale, background-color;
+  transition-duration: 150ms;
+}
+.ctl:active:not(:disabled) {
+  scale: 0.96;
+}
+.ctl:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+  cursor: default;
+}
+.ctl-primary {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+  min-width: 6.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .btn,
+  .ctl,
+  .step-btn {
+    transition: none;
+  }
+}
