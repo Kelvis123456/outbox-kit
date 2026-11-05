@@ -219,6 +219,19 @@ public sealed class OutboxTests(PostgresFixture pg)
         Assert.Empty(db.ChangeTracker.Entries());
     }
 
+    [Theory]
+    [InlineData(0, 5)]
+    [InlineData(-1, 5)]
+    [InlineData(10, 0)]
+    public async Task Options_that_would_never_make_progress_are_rejected(int batchSize, int maxAttempts)
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        var options = new OutboxOptions { BatchSize = batchSize, MaxAttempts = maxAttempts };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new OutboxDispatcher(db, new BrokerLogPublisher(cs), options));
+    }
+
     [Fact]
     public async Task Idempotent_consumer_runs_the_handler_once_per_message_even_when_called_twice()
     {

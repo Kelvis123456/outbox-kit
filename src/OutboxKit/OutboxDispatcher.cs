@@ -34,8 +34,15 @@ public sealed record OutboxOptions
 /// </summary>
 public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, OutboxOptions? options = null, TimeProvider? clock = null)
 {
-    private readonly OutboxOptions _options = options ?? new OutboxOptions();
+    private readonly OutboxOptions _options = Validate(options ?? new OutboxOptions());
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
+    private static OutboxOptions Validate(OutboxOptions o)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(o.BatchSize, 1, nameof(o.BatchSize));
+        ArgumentOutOfRangeException.ThrowIfLessThan(o.MaxAttempts, 1, nameof(o.MaxAttempts));
+        return o;
+    }
 
     /// <returns>How many messages were published in this run.</returns>
     public Task<int> RunOnceAsync(CancellationToken ct = default) =>
