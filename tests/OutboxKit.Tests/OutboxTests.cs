@@ -164,6 +164,61 @@ public sealed class OutboxTests(PostgresFixture pg)
         Assert.Equal(0, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null || m.Attempts > 0));
     }
 
+    private sealed class AlwaysFailsPublisher : IOutboxPublisher
+    {
+        public Task PublishAsync(OutboxMessage message, CancellationToken ct) => throw new InvalidOperationException("down");
+    }
+
+    [Fact]
+    public async Task RunOnce_does_not_save_unrelated_pending_changes_on_the_callers_context()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs);
+        var pending = new Delivery { MessageId = Guid.NewGuid() };
+        db.Deliveries.Add(pending);
+
+        await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync();
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(0, await check.Deliveries.CountAsync());
+        Assert.Equal(EntityState.Added, db.Entry(pending).State); // still the caller's to save
+    }
+
+    [Fact]
+    public async Task A_stale_tracked_row_cannot_make_the_dispatcher_lose_an_attempt()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 1);
+        var options = new OutboxOptions { MaxAttempts = 10 };
+
+        await using var first = DemoDb.Connect(cs);
+        await using var second = DemoDb.Connect(cs);
+        var a = new OutboxDispatcher(first, new AlwaysFailsPublisher(), options);
+        var b = new OutboxDispatcher(second, new AlwaysFailsPublisher(), options);
+
+        await a.RunOnceAsync(); // attempts = 1, and `first` may still remember that
+        await b.RunOnceAsync(); // attempts = 2
+        await a.RunOnceAsync(); // must be 3, not 2
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(3, (await check.Set<OutboxMessage>().SingleAsync()).Attempts);
+    }
+
+    [Fact]
+    public async Task The_change_tracker_does_not_grow_with_the_number_of_runs()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 30);
+
+        await using var db = DemoDb.Connect(cs);
+        var dispatcher = new OutboxDispatcher(db, new BrokerLogPublisher(cs), new OutboxOptions { BatchSize = 5 });
+        for (var i = 0; i < 6; i++) await dispatcher.RunOnceAsync();
+
+        Assert.Empty(db.ChangeTracker.Entries());
+    }
+
     [Fact]
     public async Task Idempotent_consumer_runs_the_handler_once_per_message_even_when_called_twice()
     {

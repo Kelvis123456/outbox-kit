@@ -38,37 +38,55 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
+        // AsNoTracking plus per-row ExecuteUpdate: the dispatcher never touches the caller's change
+        // tracker, so it cannot save their pending changes or trust a stale tracked copy of a row.
         var batch = await db.Set<OutboxMessage>()
             .FromSqlInterpolated($"""
                 SELECT * FROM outbox_messages
                 WHERE processed_at IS NULL AND failed_at IS NULL
-                ORDER BY created_at
+                ORDER BY created_at, id
                 LIMIT {_options.BatchSize}
                 FOR UPDATE SKIP LOCKED
                 """)
+            .AsNoTracking()
             .ToListAsync(ct);
 
         var published = 0;
         foreach (var message in batch)
         {
+            var id = message.Id;
+            Exception? failure = null;
             try
             {
                 await publisher.PublishAsync(message, ct);
-                message.ProcessedAt = _clock.GetUtcNow();
-                message.Error = null;
-                published++;
             }
             // Only our own cancellation aborts the run. A cancellation the publisher raises (an HttpClient
             // timeout, say) is an ordinary failed attempt, otherwise the row would never count it.
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                message.Attempts++;
-                message.Error = ex.Message;
-                if (message.Attempts >= _options.MaxAttempts) message.FailedAt = _clock.GetUtcNow();
+                failure = ex;
+            }
+
+            if (failure is null)
+            {
+                var now = _clock.GetUtcNow();
+                await db.Set<OutboxMessage>().Where(m => m.Id == id).ExecuteUpdateAsync(s => s
+                    .SetProperty(m => m.ProcessedAt, now)
+                    .SetProperty(m => m.Error, (string?)null), ct);
+                published++;
+            }
+            else
+            {
+                var attempts = message.Attempts + 1; // the row is locked, so the value we read is current
+                var error = failure.Message;
+                DateTimeOffset? failedAt = attempts >= _options.MaxAttempts ? _clock.GetUtcNow() : null;
+                await db.Set<OutboxMessage>().Where(m => m.Id == id).ExecuteUpdateAsync(s => s
+                    .SetProperty(m => m.Attempts, attempts)
+                    .SetProperty(m => m.Error, error)
+                    .SetProperty(m => m.FailedAt, failedAt), ct);
             }
         }
 
-        await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return published;
     }
