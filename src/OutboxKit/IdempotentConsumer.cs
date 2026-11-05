@@ -11,7 +11,7 @@ public static class IdempotentConsumer
     /// crash cannot record the message as handled without its effect, or apply the effect
     /// without recording it. Returns false when the message was already handled.
     ///
-    /// The context must not already have an open transaction, and must have no pending changes:
+    /// The context must not already have an open transaction (InvalidOperationException), and must have no pending changes:
     /// the final SaveChanges would otherwise commit them along with the handler's, and a skipped
     /// duplicate would leave them queued. Both cases throw InvalidOperationException.
     ///
@@ -26,6 +26,17 @@ public static class IdempotentConsumer
         Func<CancellationToken, Task> handler,
         CancellationToken ct = default,
         TimeProvider? clock = null)
+    {
+        // Through the execution strategy so EnableRetryOnFailure works. After a transient failure the
+        // handler runs again, which is safe because every failed attempt rolls back and is reverted.
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(
+            (db, consumer, messageId, handler, clock),
+            static (s, token) => RunAsync(s.db, s.consumer, s.messageId, s.handler, s.clock, token),
+            ct);
+    }
+
+    private static async Task<bool> RunAsync(
+        DbContext db, string consumer, Guid messageId, Func<CancellationToken, Task> handler, TimeProvider? clock, CancellationToken ct)
     {
         if (db.ChangeTracker.HasChanges())
             throw new InvalidOperationException("The context has pending changes. Save or discard them before HandleOnceAsync.");

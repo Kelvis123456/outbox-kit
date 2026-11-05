@@ -25,6 +25,10 @@ public sealed record OutboxOptions
 /// the transaction rolls back and the rows are published again by the next run. That duplicate
 /// is the price of at-least-once, so consumers must be idempotent (see IdempotentConsumer).
 ///
+/// RunOnceAsync opens its own transaction, so it throws InvalidOperationException if the context
+/// already has one open. It never touches the context's change tracker: pending changes on it are
+/// neither saved nor discarded.
+///
 /// The publish call happens while the row locks are held. That keeps the code short and the
 /// guarantee easy to reason about, at the cost of a long transaction if the broker is slow.
 /// </summary>
@@ -34,7 +38,12 @@ public sealed class OutboxDispatcher(DbContext db, IOutboxPublisher publisher, O
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
     /// <returns>How many messages were published in this run.</returns>
-    public async Task<int> RunOnceAsync(CancellationToken ct = default)
+    public Task<int> RunOnceAsync(CancellationToken ct = default) =>
+        // Goes through the execution strategy so a context configured with EnableRetryOnFailure works.
+        // On a transient failure the whole run repeats, which can publish a row again (at-least-once).
+        db.Database.CreateExecutionStrategy().ExecuteAsync(this, static (self, token) => self.RunAttemptAsync(token), ct);
+
+    private async Task<int> RunAttemptAsync(CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 

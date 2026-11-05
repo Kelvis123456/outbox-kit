@@ -40,8 +40,8 @@ public sealed class DemoDb(DbContextOptions<DemoDb> options) : DbContext(options
         });
     }
 
-    public static DemoDb Connect(string connectionString) =>
-        new(new DbContextOptionsBuilder<DemoDb>().UseNpgsql(connectionString).Options);
+    public static DemoDb Connect(string connectionString, bool retryOnFailure = false) =>
+        new(new DbContextOptionsBuilder<DemoDb>().UseNpgsql(connectionString, o => { if (retryOnFailure) o.EnableRetryOnFailure(); }).Options);
 }
 
 /// <summary>Stands in for a message broker: records the publish outside the dispatcher's transaction.</summary>

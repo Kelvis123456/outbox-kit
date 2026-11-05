@@ -332,6 +332,39 @@ public sealed class OutboxTests(PostgresFixture pg)
     }
 
     [Fact]
+    public async Task Dispatcher_and_consumer_work_on_a_context_with_EnableRetryOnFailure()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await SeedAsync(cs, 3);
+
+        await using var db = DemoDb.Connect(cs, retryOnFailure: true);
+        Assert.Equal(3, await new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync());
+
+        var id = Guid.NewGuid();
+        Assert.True(await db.HandleOnceAsync("billing", id, _ =>
+        {
+            db.Deliveries.Add(new Delivery { MessageId = id });
+            return Task.CompletedTask;
+        }));
+        Assert.False(await db.HandleOnceAsync("billing", id, _ => Task.CompletedTask));
+
+        await using var check = DemoDb.Connect(cs);
+        Assert.Equal(3, await check.Set<OutboxMessage>().CountAsync(m => m.ProcessedAt != null));
+        Assert.Equal(1, await check.Deliveries.CountAsync());
+    }
+
+    [Fact]
+    public async Task Both_throw_a_clear_error_when_a_transaction_is_already_open()
+    {
+        var cs = await pg.NewDatabaseAsync();
+        await using var db = DemoDb.Connect(cs);
+        await using var tx = await db.Database.BeginTransactionAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new OutboxDispatcher(db, new BrokerLogPublisher(cs)).RunOnceAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.HandleOnceAsync("billing", Guid.NewGuid(), _ => Task.CompletedTask));
+    }
+
+    [Fact]
     public async Task Killing_the_process_between_publish_and_commit_loses_nothing_and_applies_each_effect_once()
     {
         var cs = await pg.NewDatabaseAsync();
